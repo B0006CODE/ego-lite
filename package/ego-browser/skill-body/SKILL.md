@@ -74,6 +74,10 @@ such as `C:/Users/<name>/ego/laptop-prices-20260922-1405/`, and only run files
 written in this conversation. Create files with your file tool: PowerShell
 `Set-Content`, `Out-File`, and `>` write ANSI or UTF-16 on 5.1.
 
+Script `console` output goes to stderr and stdout stays empty. Redirect with
+`2>&1` when a run writes to a log, and read the stderr stream when a command
+looks silent.
+
 ### When the script fails to parse
 
 `SyntaxError: await is only valid in async functions and the top level bodies of
@@ -239,6 +243,51 @@ viewport, the snapshot ends with a `[more content below the viewport: ...]`
 line: nodes are omitted, not absent. If the expected result may land below
 the fold, scroll or use `full_page` before concluding it did not appear.
 
+#### Snapshot size
+
+`full_page` output tracks the document, not the task. On one dense reference
+article a `full_page` snapshot returned 537,026 characters against 15,063 for
+the same page's viewport snapshot, and mixed accessibility text runs near 0.3
+token per character: that call would have spent roughly 160k tokens to answer a
+question about one heading. Stay on the viewport scope, and reach for `subtree`
+with a region's ref before `full_page`.
+
+Locator syntax is part of the output. A link-heavy page spent 78.7% of a
+26,224-character snapshot on `[ref=N, loc=...]` strings;
+`snapshot({ includeStableLocator: false })` removed 3-13% on the pages
+measured. Keep stable locators when you must re-find an element across DOM
+changes, and drop them for navigation-only snapshots.
+
+For extraction, one `page.evaluate()` that returns the fields you need costs
+less than a snapshot of the whole region. Collecting the visible interactive
+controls from a page whose snapshot took 26,224 characters took 2,609 characters
+as a compact array, 90% smaller, and still addressed every control:
+
+```js
+const controls = await page.evaluate(() => {
+  const out = [];
+  const selector =
+    "a,button,input,textarea,select,[role=button],[role=link]," +
+    "[contenteditable=true]";
+  for (const el of document.querySelectorAll(selector)) {
+    const box = el.getBoundingClientRect();
+    if (box.width < 4 || box.height < 4) continue;
+    const name = (el.innerText || el.value || el.getAttribute("aria-label") || "")
+      .trim()
+      .replace(/\s+/g, " ")
+      .slice(0, 40);
+    if (!name) continue;
+    out.push(`${el.tagName.toLowerCase()} "${name}"`);
+    if (out.length >= 120) break;
+  }
+  return out;
+});
+```
+
+That list carries no refs: act on it with `loc=` selectors or inside
+`page.evaluate()`. Use the snapshot when you plan a multi-step sequence on the
+same page, because refs let later actions name a target without re-resolving it.
+
 The default viewport snapshot includes visible iframe content returned by the
 browser. To focus on a frame's subtree, reuse the ref printed on its `iframe`
 line:
@@ -289,6 +338,13 @@ selector syntax is not supported.
 When a selector identifies a wrapper, `focus()` and `press()` may use its
 interactive ancestor or unique editable descendant; `fill()` and
 `setInputFiles()` only continue to a unique compatible control.
+
+Framework-rendered controls accept only trusted input. `element.click()` inside
+`page.evaluate()` dispatches an untrusted event that React and Vue handlers can
+ignore, so mark the element and let `page.click()` deliver the click. For text,
+`fill()` on a wrapper, or on the hidden proxy a framework keeps beside its real
+control, fails with `<div> intercepts pointer events`; target the control the
+page actually shows.
 
 `click()`, `fill()`, `hover()`, and `dragAndDrop()` automatically bring their
 target into view with browser wheel input, falling back to a programmatic
@@ -425,6 +481,20 @@ Set an existing file input with absolute paths:
 await page.setInputFiles("input[type=file]", ["/absolute/path/report.pdf"]);
 ```
 
+Pages often ship several hidden file inputs, and then the selector is
+ambiguous: `setInputFiles("input[type=file]")` fails with
+`matched 3 elements (0 visible)`. Mark the one the UI would use from inside the
+page, then pass that selector:
+
+```js
+await page.evaluate(() => {
+  const inputs = [...document.querySelectorAll("input[type=file]")];
+  const pick = inputs.find((el) => el.multiple && /video\//.test(el.accept || ""));
+  (pick ?? inputs[0]).setAttribute("data-ego-pick", "1");
+});
+await page.setInputFiles('[data-ego-pick="1"]', ["/absolute/path/clip.mp4"]);
+```
+
 If a click creates the file input, start waiting before the click:
 
 ```js
@@ -457,6 +527,12 @@ directories. `download.path()` returns the round-local temporary file;
 files are removed when the SDK round is disposed, so call `saveAs()` before the
 script ends. Do not set a download directory with raw CDP; the download wait
 manages the browser's single shared download setting.
+
+Export flows repeat the same label at several levels: a toolbar `Export`, then a
+`Download` menu item, then a settings dialog `Export` that holds the real
+confirm. Text alone cannot separate those clicks; scope each one to its region,
+for example by checking `getBoundingClientRect()`, and keep one download wait
+armed across the whole sequence.
 
 `page.fetch()` runs `window.fetch()` in the Page: relative URLs, cookies, and
 service workers use that Page, and browser CORS still applies. It returns
